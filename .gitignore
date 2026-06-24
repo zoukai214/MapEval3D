@@ -1,0 +1,4 @@
+output/
+docs/
+__pycache__/
+*.pyc

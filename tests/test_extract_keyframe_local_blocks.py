@@ -1,0 +1,398 @@
+import csv
+import importlib.util
+import json
+import tempfile
+import unittest
+from pathlib import Path
+
+import laspy
+import numpy as np
+
+from mapeval3d.config_utils import load_eval_config
+from mapeval3d.crop_utils import crop_points_by_rectangle
+from mapeval3d.ground_eval import evaluate_ground_block
+from mapeval3d.io_utils import build_block_filename
+from mapeval3d.io_utils import filter_ground_points
+from mapeval3d.io_utils import read_gps_pose_rows
+from mapeval3d.io_utils import select_keyframes_by_2d_distance
+from mapeval3d.io_utils import write_index_rows
+from mapeval3d.io_utils import write_plane_distance_plot
+from mapeval3d.io_utils import write_plane_thickness_plot
+from mapeval3d.pose_utils import quaternion_to_rotation_matrix
+from mapeval3d.pose_utils import transform_world_points_to_keyframe
+
+
+SCRIPT_PATH = Path(__file__).resolve().parent.parent / "tools" / "extract_keyframe_local_blocks.py"
+SCRIPT_SPEC = importlib.util.spec_from_file_location("extract_keyframe_local_blocks", SCRIPT_PATH)
+SCRIPT_MODULE = importlib.util.module_from_spec(SCRIPT_SPEC)
+assert SCRIPT_SPEC.loader is not None
+SCRIPT_SPEC.loader.exec_module(SCRIPT_MODULE)
+
+
+class PoseUtilsTest(unittest.TestCase):
+
+    def test_quaternion_to_rotation_matrix_identity(self) -> None:
+        rotation = quaternion_to_rotation_matrix(0.0, 0.0, 0.0, 1.0)
+        np.testing.assert_allclose(rotation, np.eye(3))
+
+    def test_transform_world_points_to_keyframe_translation_only(self) -> None:
+        points_world = np.array([[10.0, 5.0, 1.0], [11.0, 7.0, 1.0]])
+        translation = np.array([10.0, 5.0, 1.0])
+        rotation = np.eye(3)
+        transformed = transform_world_points_to_keyframe(
+            points_world,
+            translation,
+            rotation,
+        )
+        np.testing.assert_allclose(
+            transformed,
+            np.array([[0.0, 0.0, 0.0], [1.0, 2.0, 0.0]]),
+        )
+
+    def test_transform_world_points_to_keyframe_with_yaw_rotation(self) -> None:
+        points_world = np.array([[1.0, 0.0, 0.0]])
+        translation = np.array([0.0, 0.0, 0.0])
+        half_sqrt = np.sqrt(0.5)
+        rotation = quaternion_to_rotation_matrix(0.0, 0.0, half_sqrt, half_sqrt)
+        transformed = transform_world_points_to_keyframe(
+            points_world,
+            translation,
+            rotation,
+        )
+        np.testing.assert_allclose(
+            transformed,
+            np.array([[0.0, -1.0, 0.0]]),
+            atol=1e-6,
+        )
+
+
+class CropUtilsTest(unittest.TestCase):
+
+    def test_crop_points_by_rectangle_keeps_boundary_points(self) -> None:
+        points_local = np.array(
+            [
+                [-2.5, -1.0, 0.0],
+                [2.5, 1.0, 0.0],
+                [2.6, 0.0, 0.0],
+                [0.0, 3.1, 0.0],
+            ]
+        )
+        mask = crop_points_by_rectangle(points_local, window_size_x=5.0, window_size_y=4.0)
+        np.testing.assert_array_equal(mask, np.array([True, True, False, False]))
+
+    def test_crop_points_by_rectangle_supports_non_square_window(self) -> None:
+        points_local = np.array(
+            [
+                [3.9, 0.9, 0.0],
+                [3.9, 1.1, 0.0],
+                [4.1, 0.9, 0.0],
+            ]
+        )
+        mask = crop_points_by_rectangle(points_local, window_size_x=8.0, window_size_y=2.0)
+        np.testing.assert_array_equal(mask, np.array([True, False, False]))
+
+
+class IoUtilsTest(unittest.TestCase):
+
+    def test_filter_ground_points_keeps_only_classification_one(self) -> None:
+        points_xyz = np.array([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [2.0, 2.0, 2.0]])
+        classifications = np.array([0, 1, 1], dtype=np.uint8)
+        ground_points, ground_mask = filter_ground_points(points_xyz, classifications)
+        np.testing.assert_allclose(ground_points, np.array([[1.0, 1.0, 1.0], [2.0, 2.0, 2.0]]))
+        np.testing.assert_array_equal(ground_mask, np.array([False, True, True]))
+
+    def test_write_index_rows_writes_expected_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_csv = Path(temp_dir) / "index.csv"
+            rows = [
+                {
+                    "id": 0,
+                    "timestamp_ms": 1500,
+                    "status": "ok",
+                    "point_count": 12,
+                    "plane_distance_mean_p95": 0.01,
+                    "plane_distance_variance_p95": 0.0001,
+                    "plane_distance_p95_threshold": 0.03,
+                    "plane_distance_thickness_p95_p5": 0.02,
+                    "plane_inlier_count_p95": 11,
+                    "ransac_inlier_count": 12,
+                    "ransac_outlier_ratio": 0.0,
+                }
+            ]
+            write_index_rows(output_csv, rows)
+            with output_csv.open("r", newline="") as handle:
+                reader = csv.DictReader(handle)
+                data = list(reader)
+            self.assertEqual(data[0]["id"], "0")
+            self.assertEqual(data[0]["timestamp_ms"], "1500")
+            self.assertEqual(data[0]["plane_inlier_count_p95"], "11")
+
+    def test_write_plane_distance_plot_creates_png(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_png = Path(temp_dir) / "plot.png"
+            rows = [
+                {
+                    "id": 0,
+                    "timestamp_ms": 1000,
+                    "status": "ok",
+                    "point_count": 10,
+                    "plane_distance_mean_p95": 0.01,
+                    "plane_distance_variance_p95": 0.0001,
+                    "plane_distance_p95_threshold": 0.02,
+                    "plane_distance_thickness_p95_p5": 0.015,
+                    "plane_inlier_count_p95": 9,
+                    "ransac_inlier_count": 10,
+                    "ransac_outlier_ratio": 0.0,
+                },
+                {
+                    "id": 1,
+                    "timestamp_ms": 2000,
+                    "status": "ok",
+                    "point_count": 11,
+                    "plane_distance_mean_p95": 0.02,
+                    "plane_distance_variance_p95": 0.0002,
+                    "plane_distance_p95_threshold": 0.03,
+                    "plane_distance_thickness_p95_p5": 0.025,
+                    "plane_inlier_count_p95": 10,
+                    "ransac_inlier_count": 11,
+                    "ransac_outlier_ratio": 0.0,
+                },
+            ]
+            write_plane_distance_plot(output_png, rows)
+            self.assertTrue(output_png.exists())
+
+    def test_write_plane_thickness_plot_creates_png(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            output_png = Path(temp_dir) / "thickness_plot.png"
+            rows = [
+                {
+                    "id": 0,
+                    "timestamp_ms": 1000,
+                    "status": "ok",
+                    "point_count": 10,
+                    "plane_distance_mean_p95": 0.01,
+                    "plane_distance_variance_p95": 0.0001,
+                    "plane_distance_p95_threshold": 0.02,
+                    "plane_distance_thickness_p95_p5": 0.015,
+                    "plane_inlier_count_p95": 9,
+                    "ransac_inlier_count": 10,
+                    "ransac_outlier_ratio": 0.0,
+                },
+                {
+                    "id": 1,
+                    "timestamp_ms": 2000,
+                    "status": "ok",
+                    "point_count": 11,
+                    "plane_distance_mean_p95": 0.02,
+                    "plane_distance_variance_p95": 0.0002,
+                    "plane_distance_p95_threshold": 0.03,
+                    "plane_distance_thickness_p95_p5": 0.025,
+                    "plane_inlier_count_p95": 10,
+                    "ransac_inlier_count": 11,
+                    "ransac_outlier_ratio": 0.0,
+                },
+            ]
+            write_plane_thickness_plot(output_png, rows)
+            self.assertTrue(output_png.exists())
+
+    def test_build_block_filename_uses_timestamp(self) -> None:
+        self.assertEqual(build_block_filename(1500), "keyframe_1500.laz")
+
+    def test_select_keyframes_by_2d_distance_keeps_first_and_every_10m(self) -> None:
+        pose_rows = [
+            {"timestamp_ms": 1000, "x": 0.0, "y": 0.0, "z": 0.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+            {"timestamp_ms": 2000, "x": 4.0, "y": 0.0, "z": 0.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+            {"timestamp_ms": 3000, "x": 10.5, "y": 0.0, "z": 0.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+            {"timestamp_ms": 4000, "x": 18.0, "y": 0.0, "z": 0.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+            {"timestamp_ms": 5000, "x": 21.0, "y": 8.0, "z": 0.0, "qx": 0.0, "qy": 0.0, "qz": 0.0, "qw": 1.0},
+        ]
+        keyframes = select_keyframes_by_2d_distance(pose_rows, distance_interval_m=10.0)
+        self.assertEqual([row["timestamp_ms"] for row in keyframes], [1000, 3000, 5000])
+
+    def test_read_gps_pose_rows_parses_gps_msg_format(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            gps_path = Path(temp_dir) / "gps_msg.txt"
+            gps_path.write_text(
+                "#t,x,y,z,l,l,h,ins_status,pos_type,err,qw,qx,qy,qz\n"
+                "1000,1.0,2.0,3.0,0,0,0,0,0,0,1.0,0.1,0.2,0.3\n",
+                encoding="utf-8",
+            )
+            rows = read_gps_pose_rows(gps_path)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["timestamp_ms"], 1000)
+        self.assertAlmostEqual(rows[0]["x"], 1.0)
+        self.assertAlmostEqual(rows[0]["qy"], 0.2)
+
+
+class ExtractionToolTest(unittest.TestCase):
+
+    def test_load_eval_config_reads_json_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "window_size_x_m": 4.0,
+                        "window_size_y_m": 4.0,
+                        "distance_interval_m": 4.0,
+                        "fit_method": "ransac",
+                        "ransac_distance_threshold_m": 0.05,
+                        "ransac_max_iterations": 50,
+                        "ransac_min_inliers": 10,
+                        "p95_percentile": 95.0,
+                        "min_points_to_fit": 10,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            config = load_eval_config(config_path)
+        self.assertEqual(config["fit_method"], "ransac")
+        self.assertEqual(config["window_size_x_m"], 4.0)
+
+    def test_evaluate_ground_block_uses_ransac_and_p95(self) -> None:
+        rng = np.random.default_rng(0)
+        xy = rng.uniform(-1.0, 1.0, size=(200, 2))
+        z = 0.5 * xy[:, 0] - 0.2 * xy[:, 1] + 0.1 + rng.normal(0.0, 0.005, size=200)
+        plane_points = np.column_stack((xy, z))
+        outliers = np.array(
+            [
+                [0.0, 0.0, 1.0],
+                [0.5, -0.5, -1.0],
+                [-0.5, 0.5, 1.2],
+            ]
+        )
+        points = np.vstack((plane_points, outliers))
+        result = evaluate_ground_block(
+            points,
+            fit_method="ransac",
+            distance_threshold_m=0.03,
+            max_iterations=200,
+            min_inliers=100,
+            p95_percentile=95.0,
+        )
+        self.assertEqual(result["plane_fit_method"], "ransac")
+        self.assertGreaterEqual(result["ransac_inlier_count"], 190)
+        self.assertGreater(result["plane_distance_thickness_p95_p5"], 0.0)
+        self.assertLess(result["plane_distance_mean_p95"], 0.02)
+        self.assertLess(result["plane_distance_variance_p95"], 0.0005)
+        self.assertGreaterEqual(result["ransac_outlier_ratio"], 0.0)
+        self.assertLess(result["ransac_outlier_ratio"], 0.1)
+
+    def test_plane_distance_thickness_uses_signed_distances(self) -> None:
+        xy = np.array(
+            [
+                [0.0, 0.0],
+                [1.0, 0.0],
+                [0.0, 1.0],
+                [1.0, 1.0],
+                [0.5, 0.2],
+                [0.2, 0.5],
+            ]
+        )
+        signed_offsets = np.array([-0.03, -0.02, -0.01, 0.01, 0.02, 0.03])
+        plane_points = np.column_stack((xy, signed_offsets))
+        result = evaluate_ground_block(
+            plane_points,
+            fit_method="ransac",
+            distance_threshold_m=0.05,
+            max_iterations=50,
+            min_inliers=3,
+            p95_percentile=95.0,
+        )
+        self.assertGreater(result["plane_distance_thickness_p95_p5"], 0.04)
+
+    def test_main_writes_block_and_index_for_ground_points(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            input_laz = temp_root / "input.laz"
+            input_pose_csv = temp_root / "poses.csv"
+            output_dir = temp_root / "output"
+            config_path = temp_root / "config.json"
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "window_size_x_m": 5.0,
+                        "window_size_y_m": 5.0,
+                        "distance_interval_m": 10.0,
+                        "fit_method": "ransac",
+                        "ransac_distance_threshold_m": 0.05,
+                        "ransac_max_iterations": 100,
+                        "ransac_min_inliers": 20,
+                        "p95_percentile": 95.0,
+                        "min_points_to_fit": 20,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            header = laspy.LasHeader(point_format=3, version="1.2")
+            las = laspy.LasData(header)
+            local_x = np.linspace(-1.5, 1.5, 25)
+            local_y = np.linspace(-1.5, 1.5, 25)
+            grid_x, grid_y = np.meshgrid(local_x, local_y)
+            flat_x = grid_x.reshape(-1)
+            flat_y = grid_y.reshape(-1)
+            flat_z = 1.0 + 0.01 * flat_x - 0.02 * flat_y
+            las.x = np.concatenate((10.0 + flat_x, np.array([20.0])))
+            las.y = np.concatenate((5.0 + flat_y, np.array([20.0])))
+            las.z = np.concatenate((flat_z, np.array([1.0])))
+            las.classification = np.concatenate(
+                (np.ones(flat_x.shape[0], dtype=np.uint8), np.array([0], dtype=np.uint8))
+            )
+            las.write(input_laz)
+
+            with input_pose_csv.open("w", newline="") as handle:
+                handle.write("#t,x,y,z,l,l,h,ins_status,pos_type,err,qw,qx,qy,qz\n")
+                handle.write("1500,10.0,5.0,1.0,0,0,0,0,0,0,1.0,0.0,0.0,0.0\n")
+
+            exit_code = SCRIPT_MODULE.main(
+                [
+                    "--input-laz",
+                    str(input_laz),
+                    "--input-gps-msg",
+                    str(input_pose_csv),
+                    "--output-dir",
+                    str(output_dir),
+                    "--config",
+                    str(config_path),
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+
+            output_csv = output_dir / "index.csv"
+            self.assertTrue(output_csv.exists())
+            with output_csv.open("r", newline="") as handle:
+                rows = list(csv.DictReader(handle))
+            self.assertEqual(
+                rows[0].keys(),
+                {
+                    "id",
+                    "timestamp_ms",
+                    "status",
+                    "point_count",
+                    "plane_distance_mean_p95",
+                    "plane_distance_variance_p95",
+                    "plane_distance_p95_threshold",
+                    "plane_distance_thickness_p95_p5",
+                    "plane_inlier_count_p95",
+                    "ransac_inlier_count",
+                    "ransac_outlier_ratio",
+                },
+            )
+            self.assertEqual(rows[0]["id"], "0")
+            self.assertEqual(rows[0]["status"], "ok")
+            self.assertEqual(rows[0]["point_count"], "625")
+            self.assertEqual(rows[0]["timestamp_ms"], "1500")
+            self.assertNotEqual(rows[0]["plane_distance_mean_p95"], "")
+            self.assertNotEqual(rows[0]["plane_distance_thickness_p95_p5"], "")
+            output_laz = output_dir / "blocks" / "keyframe_1500.laz"
+            self.assertTrue(output_laz.exists())
+            output_points = laspy.read(output_laz)
+            self.assertEqual(len(output_points.x), 625)
+            self.assertTrue((output_dir / "plane_distance_mean_p95.png").exists())
+            self.assertTrue((output_dir / "plane_distance_thickness_p95_p5.png").exists())
+
+
+if __name__ == "__main__":
+    unittest.main()
