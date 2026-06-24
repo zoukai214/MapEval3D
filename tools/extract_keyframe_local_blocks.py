@@ -13,6 +13,8 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from mapeval3d.config_utils import load_eval_config
+from mapeval3d.calib_utils import find_clip_for_timestamp
+from mapeval3d.calib_utils import load_session_calibrations
 from mapeval3d.crop_utils import crop_points_by_rectangle
 from mapeval3d.ground_eval import evaluate_ground_block
 from mapeval3d.io_utils import build_block_filename
@@ -25,6 +27,7 @@ from mapeval3d.io_utils import write_index_rows
 from mapeval3d.io_utils import write_plane_distance_plot
 from mapeval3d.io_utils import write_plane_thickness_plot
 from mapeval3d.pose_utils import quaternion_to_rotation_matrix
+from mapeval3d.pose_utils import transform_world_points_to_car_frame
 from mapeval3d.pose_utils import transform_world_points_to_keyframe
 
 
@@ -32,6 +35,7 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-laz", required=True)
     parser.add_argument("--input-gps-msg", required=True)
+    parser.add_argument("--session-path", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--config", required=True)
     return parser.parse_args(argv)
@@ -47,6 +51,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     points_xyz, classifications, las = read_laz_points_and_classification(Path(args.input_laz))
     ground_points_xyz, ground_mask = filter_ground_points(points_xyz, classifications)
     pose_rows = read_gps_pose_rows(Path(args.input_gps_msg))
+    clip_infos = load_session_calibrations(Path(args.session_path))
     keyframe_rows = select_keyframes_by_2d_distance(
         pose_rows,
         config["distance_interval_m"],
@@ -77,10 +82,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             float(row["qz"]),
             float(row["qw"]),
         )
-        points_local = transform_world_points_to_keyframe(
+        clip_info = find_clip_for_timestamp(clip_infos, timestamp_ms)
+        points_local = transform_world_points_to_car_frame(
             ground_points_xyz,
             translation,
             rotation,
+            clip_info["gnss_to_lidar_matrix"],
+            clip_info["lidar_to_car_matrix"],
         )
         crop_mask = crop_points_by_rectangle(
             points_local,

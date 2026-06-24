@@ -8,6 +8,9 @@ from pathlib import Path
 import laspy
 import numpy as np
 
+from mapeval3d.calib_utils import extract_clip_start_timestamp_ms
+from mapeval3d.calib_utils import find_clip_for_timestamp
+from mapeval3d.calib_utils import load_session_calibrations
 from mapeval3d.config_utils import load_eval_config
 from mapeval3d.crop_utils import crop_points_by_rectangle
 from mapeval3d.ground_eval import evaluate_ground_block
@@ -19,6 +22,8 @@ from mapeval3d.io_utils import write_index_rows
 from mapeval3d.io_utils import write_plane_distance_plot
 from mapeval3d.io_utils import write_plane_thickness_plot
 from mapeval3d.pose_utils import quaternion_to_rotation_matrix
+from mapeval3d.pose_utils import transform_points_with_homogeneous_matrix
+from mapeval3d.pose_utils import transform_world_points_to_car_frame
 from mapeval3d.pose_utils import transform_world_points_to_keyframe
 
 
@@ -27,6 +32,85 @@ SCRIPT_SPEC = importlib.util.spec_from_file_location("extract_keyframe_local_blo
 SCRIPT_MODULE = importlib.util.module_from_spec(SCRIPT_SPEC)
 assert SCRIPT_SPEC.loader is not None
 SCRIPT_SPEC.loader.exec_module(SCRIPT_MODULE)
+
+
+class CalibrationUtilsTest(unittest.TestCase):
+
+    def test_extract_clip_start_timestamp_from_name(self) -> None:
+        self.assertEqual(
+            extract_clip_start_timestamp_ms("GACRT025_1762669096_MT"),
+            1762669096000,
+        )
+
+    def test_find_clip_for_timestamp_matches_interval(self) -> None:
+        clip_infos = [
+            {"clip_name": "A_1000_MT", "start_timestamp_ms": 1000},
+            {"clip_name": "A_2000_MT", "start_timestamp_ms": 2000},
+            {"clip_name": "A_3000_MT", "start_timestamp_ms": 3000},
+        ]
+        matched = find_clip_for_timestamp(clip_infos, 2500)
+        self.assertEqual(matched["clip_name"], "A_2000_MT")
+
+    def test_load_session_calibrations_reads_two_extrinsics(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            session_path = Path(temp_dir)
+            clip_dir = session_path / "GACRT025_1762669096_MT" / "calib_extract"
+            clip_dir.mkdir(parents=True)
+            gnss_to_lidar = {
+                "gnss-to-lidar-top": {
+                    "param": {
+                        "sensor_calib": {
+                            "data": [
+                                [1.0, 0.0, 0.0, 1.0],
+                                [0.0, 1.0, 0.0, 2.0],
+                                [0.0, 0.0, 1.0, 3.0],
+                                [0.0, 0.0, 0.0, 1.0],
+                            ]
+                        }
+                    }
+                }
+            }
+            lidar_to_car = {
+                "lidar-top-to-car": {
+                    "param": {
+                        "sensor_calib": {
+                            "data": [
+                                [1.0, 0.0, 0.0, 0.5],
+                                [0.0, 1.0, 0.0, 0.0],
+                                [0.0, 0.0, 1.0, 0.0],
+                                [0.0, 0.0, 0.0, 1.0],
+                            ]
+                        }
+                    }
+                }
+            }
+            (clip_dir / "calib_gnss_to_lidar_top_ENU.json").write_text(
+                json.dumps(gnss_to_lidar),
+                encoding="utf-8",
+            )
+            (clip_dir / "calib_lidar_top_to_car.json").write_text(
+                json.dumps(lidar_to_car),
+                encoding="utf-8",
+            )
+
+            clip_infos = load_session_calibrations(session_path)
+
+        self.assertEqual(len(clip_infos), 1)
+        np.testing.assert_allclose(
+            clip_infos[0]["gnss_to_lidar_matrix"],
+            np.array(
+                [
+                    [1.0, 0.0, 0.0, 1.0],
+                    [0.0, 1.0, 0.0, 2.0],
+                    [0.0, 0.0, 1.0, 3.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                ]
+            ),
+        )
+        np.testing.assert_allclose(
+            clip_infos[0]["lidar_to_car_matrix"][0, 3],
+            0.5,
+        )
 
 
 class PoseUtilsTest(unittest.TestCase):
@@ -64,6 +148,48 @@ class PoseUtilsTest(unittest.TestCase):
             np.array([[0.0, -1.0, 0.0]]),
             atol=1e-6,
         )
+
+    def test_transform_points_with_homogeneous_matrix_translation_only(self) -> None:
+        points = np.array([[0.0, 0.0, 0.0]])
+        matrix = np.array(
+            [
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 2.0],
+                [0.0, 0.0, 1.0, 3.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        transformed = transform_points_with_homogeneous_matrix(points, matrix)
+        np.testing.assert_allclose(transformed, np.array([[1.0, 2.0, 3.0]]))
+
+    def test_transform_world_points_to_car_frame_chains_gnss_lidar_car(self) -> None:
+        points_world = np.array([[10.0, 0.0, 0.0]])
+        gnss_translation = np.array([10.0, 0.0, 0.0])
+        gnss_rotation = np.eye(3)
+        gnss_to_lidar_matrix = np.array(
+            [
+                [1.0, 0.0, 0.0, 1.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        lidar_to_car_matrix = np.array(
+            [
+                [1.0, 0.0, 0.0, 0.5],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ]
+        )
+        transformed = transform_world_points_to_car_frame(
+            points_world,
+            gnss_translation,
+            gnss_rotation,
+            gnss_to_lidar_matrix,
+            lidar_to_car_matrix,
+        )
+        np.testing.assert_allclose(transformed, np.array([[1.5, 0.0, 0.0]]))
 
 
 class CropUtilsTest(unittest.TestCase):
@@ -308,12 +434,15 @@ class ExtractionToolTest(unittest.TestCase):
             input_pose_csv = temp_root / "poses.csv"
             output_dir = temp_root / "output"
             config_path = temp_root / "config.json"
+            session_path = temp_root / "session"
+            clip_dir = session_path / "GACRT025_1_MT" / "calib_extract"
+            clip_dir.mkdir(parents=True)
 
             config_path.write_text(
                 json.dumps(
                     {
-                        "window_size_x_m": 5.0,
-                        "window_size_y_m": 5.0,
+                        "window_size_x_m": 10.0,
+                        "window_size_y_m": 10.0,
                         "distance_interval_m": 10.0,
                         "fit_method": "ransac",
                         "ransac_distance_threshold_m": 0.05,
@@ -321,6 +450,44 @@ class ExtractionToolTest(unittest.TestCase):
                         "ransac_min_inliers": 20,
                         "p95_percentile": 95.0,
                         "min_points_to_fit": 20,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (clip_dir / "calib_gnss_to_lidar_top_ENU.json").write_text(
+                json.dumps(
+                    {
+                        "gnss-to-lidar-top": {
+                            "param": {
+                                "sensor_calib": {
+                                    "data": [
+                                        [1.0, 0.0, 0.0, 1.0],
+                                        [0.0, 1.0, 0.0, 0.0],
+                                        [0.0, 0.0, 1.0, 0.0],
+                                        [0.0, 0.0, 0.0, 1.0],
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (clip_dir / "calib_lidar_top_to_car.json").write_text(
+                json.dumps(
+                    {
+                        "lidar-top-to-car": {
+                            "param": {
+                                "sensor_calib": {
+                                    "data": [
+                                        [1.0, 0.0, 0.0, 0.5],
+                                        [0.0, 1.0, 0.0, 0.0],
+                                        [0.0, 0.0, 1.0, 0.0],
+                                        [0.0, 0.0, 0.0, 1.0],
+                                    ]
+                                }
+                            }
+                        }
                     }
                 ),
                 encoding="utf-8",
@@ -352,6 +519,8 @@ class ExtractionToolTest(unittest.TestCase):
                     str(input_laz),
                     "--input-gps-msg",
                     str(input_pose_csv),
+                    "--session-path",
+                    str(session_path),
                     "--output-dir",
                     str(output_dir),
                     "--config",
@@ -390,6 +559,8 @@ class ExtractionToolTest(unittest.TestCase):
             self.assertTrue(output_laz.exists())
             output_points = laspy.read(output_laz)
             self.assertEqual(len(output_points.x), 625)
+            np.testing.assert_allclose(np.min(np.asarray(output_points.x)), 0.0)
+            np.testing.assert_allclose(np.max(np.asarray(output_points.x)), 3.0)
             self.assertTrue((output_dir / "plane_distance_mean_p95.png").exists())
             self.assertTrue((output_dir / "plane_distance_thickness_p95_p5.png").exists())
 

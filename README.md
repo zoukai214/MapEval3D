@@ -6,8 +6,11 @@
 
 - 读取单个 `laz` 地图文件
 - 读取 `gps_msg.txt`
+- 读取原始数据 `session_path`
 - 按轨迹距离间隔选取关键帧
-- 在关键帧局部坐标系下切出固定大小的地面点云块
+- 按 `gps_msg.txt` 每帧时间戳匹配所属 `clip`
+- 从每个 `clip` 读取 `GNSS -> LiDAR` 与 `LiDAR -> Car` 外参
+- 将局部点云块转到关键帧自车坐标系
 - 使用 `RANSAC` 拟合局部地面平面
 - 输出局部地面质量评估表格
 - 输出两张折线图
@@ -35,6 +38,12 @@
 
 - 一个带 `classification` 字段的 `laz` 文件
 - 一个 `gps_msg.txt` 文件
+- 一个原始数据 `session_path`
+
+`session_path` 下需要包含多个 `clip` 目录。每个 `clip` 目录下都需要有：
+
+- `calib_extract/calib_gnss_to_lidar_top_ENU.json`
+- `calib_extract/calib_lidar_top_to_car.json`
 
 当前实现默认把：
 
@@ -50,6 +59,7 @@
 python3 tools/extract_keyframe_local_blocks.py \
   --input-laz /path/to/input.laz \
   --input-gps-msg /path/to/gps_msg.txt \
+  --session-path /path/to/session_path \
   --output-dir /path/to/output_dir \
   --config config/local_block_eval.json
 ```
@@ -60,6 +70,7 @@ python3 tools/extract_keyframe_local_blocks.py \
 python3 tools/extract_keyframe_local_blocks.py \
   --input-laz /mnt/workspace/test_data/output/prelabel/RoadMark_label/laz/1762669099099.laz \
   --input-gps-msg /mnt/workspace/test_data/output/prelabel/RoadMark_label/gps_msg.txt \
+  --session-path /mnt/workspace/test_data/input_raw_data \
   --output-dir /mnt/workspace/mapping_ground/MapEval3D/output/real_run_eval \
   --config /mnt/workspace/mapping_ground/MapEval3D/config/local_block_eval.json
 ```
@@ -71,6 +82,9 @@ python3 tools/extract_keyframe_local_blocks.py \
 
 - `--input-gps-msg`
   输入轨迹与位姿文件 `gps_msg.txt` 路径。
+
+- `--session-path`
+  原始数据目录路径。程序会扫描该目录下的 `clip`，并按关键帧时间戳匹配对应标定。
 
 - `--output-dir`
   输出目录。
@@ -125,6 +139,54 @@ python3 tools/extract_keyframe_local_blocks.py \
 - `min_points_to_fit`
   一个局部块允许做平面拟合的最小点数。
 
+## 坐标变换链路
+
+当前输出点云块和评估指标都在关键帧自车坐标系下计算。
+
+每个关键帧的坐标变换链路为：
+
+```text
+world -> keyframe_gnss -> keyframe_lidar -> keyframe_car
+```
+
+具体来源：
+
+- `world -> keyframe_gnss`
+  来自 `gps_msg.txt` 当前帧位姿
+
+- `keyframe_gnss -> keyframe_lidar`
+  来自所属 `clip/calib_extract/calib_gnss_to_lidar_top_ENU.json`
+
+- `keyframe_lidar -> keyframe_car`
+  来自所属 `clip/calib_extract/calib_lidar_top_to_car.json`
+
+说明：
+
+- 一个 `gps_msg.txt` 可能由多个 `clip` 拼接而成
+- 不同关键帧可能对应不同 `clip`
+- 程序按每一帧 `timestamp_ms` 匹配所属 `clip`
+
+## clip 匹配规则
+
+程序从 `session_path` 下每个 `clip` 目录名提取起始时间戳，例如：
+
+- `GACRT025_1762669096_MT`
+- `GACRT025_1762669116_MT`
+
+然后按时间排序，对某一帧 `timestamp_ms` 使用以下区间匹配：
+
+```text
+clip_i_start <= timestamp_ms < clip_{i+1}_start
+```
+
+最后一个 `clip` 的时间区间向后开放。
+
+以下情况会直接报错并终止：
+
+- 某个 `clip` 缺少任一标定文件
+- 标定文件格式非法
+- 某一帧时间戳找不到所属 `clip`
+
 ## 输出说明
 
 运行完成后，输出目录下通常包含：
@@ -140,7 +202,7 @@ python3 tools/extract_keyframe_local_blocks.py \
   每个关键帧局部块对应的一行评估结果。
 
 - `blocks/`
-  每个关键帧对应的局部地面点云块，文件名为 `keyframe_<timestamp_ms>.laz`。
+  每个关键帧对应的局部地面点云块，文件名为 `keyframe_<timestamp_ms>.laz`。当前块坐标系为关键帧自车坐标系。
 
 - `plane_distance_mean_p95.png`
   以 `id` 为横轴、`plane_distance_mean_p95` 为纵轴的折线图。
@@ -262,6 +324,17 @@ python3 tools/extract_keyframe_local_blocks.py \
 
 ```bash
 python3 -m unittest tests.test_extract_keyframe_local_blocks -v
+```
+
+真实数据验证示例：
+
+```bash
+python3 tools/extract_keyframe_local_blocks.py \
+  --input-laz /mnt/workspace/test_data/output/prelabel/RoadMark_label/laz/1762669099099.laz \
+  --input-gps-msg /mnt/workspace/test_data/output/prelabel/RoadMark_label/gps_msg.txt \
+  --session-path /mnt/workspace/test_data/input_raw_data \
+  --output-dir /mnt/workspace/mapping_ground/MapEval3D/output/real_run_eval \
+  --config /mnt/workspace/mapping_ground/MapEval3D/config/local_block_eval.json
 ```
 
 ## 当前未上传目录

@@ -28,3 +28,39 @@ def transform_world_points_to_keyframe(
 ) -> np.ndarray:
     centered = points_world - translation.reshape(1, 3)
     return centered @ rotation_world_from_keyframe
+
+
+def transform_points_with_homogeneous_matrix(
+    points_xyz: np.ndarray,
+    transform_matrix: np.ndarray,
+) -> np.ndarray:
+    if transform_matrix.shape != (4, 4):
+        raise ValueError("Transform matrix must be 4x4.")
+    homogeneous_points = np.concatenate(
+        (points_xyz, np.ones((points_xyz.shape[0], 1), dtype=np.float64)),
+        axis=1,
+    )
+    transformed = homogeneous_points @ transform_matrix.T
+    return transformed[:, :3]
+
+
+def transform_world_points_to_car_frame(
+    points_world: np.ndarray,
+    gnss_translation: np.ndarray,
+    rotation_world_from_keyframe: np.ndarray,
+    gnss_to_lidar_matrix: np.ndarray,
+    lidar_to_car_matrix: np.ndarray,
+) -> np.ndarray:
+    points_gnss = transform_world_points_to_keyframe(
+        points_world,
+        gnss_translation,
+        rotation_world_from_keyframe,
+    )
+    points_lidar = transform_points_with_homogeneous_matrix(
+        points_gnss,
+        gnss_to_lidar_matrix,
+    )
+    return transform_points_with_homogeneous_matrix(
+        points_lidar,
+        lidar_to_car_matrix,
+    )
