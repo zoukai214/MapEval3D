@@ -25,7 +25,9 @@ from mapeval3d.io_utils import select_keyframes_by_2d_distance
 from mapeval3d.io_utils import write_cropped_laz
 from mapeval3d.io_utils import write_index_rows
 from mapeval3d.io_utils import write_plane_distance_plot
+from mapeval3d.io_utils import write_plane_threshold_plot
 from mapeval3d.io_utils import write_plane_thickness_plot
+from mapeval3d.io_utils import write_summary_rows
 from mapeval3d.pose_utils import quaternion_to_rotation_matrix
 from mapeval3d.pose_utils import transform_world_points_to_car_frame
 from mapeval3d.pose_utils import transform_world_points_to_keyframe
@@ -44,14 +46,15 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     config = load_eval_config(Path(args.config))
+    session_path = Path(args.session_path)
+    session_name = session_path.name
     output_dir = Path(args.output_dir)
     blocks_dir = output_dir / "blocks"
-    blocks_dir.mkdir(parents=True, exist_ok=True)
 
     points_xyz, classifications, las = read_laz_points_and_classification(Path(args.input_laz))
     ground_points_xyz, ground_mask = filter_ground_points(points_xyz, classifications)
     pose_rows = read_gps_pose_rows(Path(args.input_gps_msg))
-    clip_infos = load_session_calibrations(Path(args.session_path))
+    clip_infos = load_session_calibrations(session_path)
     keyframe_rows = select_keyframes_by_2d_distance(
         pose_rows,
         config["distance_interval_m"],
@@ -94,6 +97,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             points_local,
             config["window_size_x_m"],
             config["window_size_y_m"],
+            config["window_size_z_min_m"],
+            config["window_size_z_max_m"],
         )
         cropped_local_points = points_local[crop_mask]
 
@@ -146,9 +151,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             "ransac_outlier_ratio": eval_result["ransac_outlier_ratio"],
         }
 
-        block_name = build_block_filename(timestamp_ms)
-        output_path = blocks_dir / block_name
-        write_cropped_laz(output_path, las, ground_mask, crop_mask, cropped_local_points)
+        if config["save_blocks_laz"]:
+            block_name = build_block_filename(timestamp_ms)
+            output_path = blocks_dir / block_name
+            write_cropped_laz(output_path, las, ground_mask, crop_mask, cropped_local_points)
         index_rows.append(
             {
                 **base_row,
@@ -159,7 +165,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
 
     write_index_rows(output_dir / "index.csv", index_rows)
+    write_summary_rows(output_dir / "summary.csv", index_rows, session_name=session_name)
     write_plane_distance_plot(output_dir / "plane_distance_mean_p95.png", index_rows)
+    write_plane_threshold_plot(output_dir / "plane_distance_p95_threshold.png", index_rows)
     write_plane_thickness_plot(output_dir / "plane_distance_thickness_p95_p5.png", index_rows)
     return 0
 

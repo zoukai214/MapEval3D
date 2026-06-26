@@ -30,6 +30,10 @@ def _load_extrinsic_matrix(calib_path: Path, top_level_key: str) -> np.ndarray:
 def load_session_calibrations(session_path: Path) -> List[Dict[str, object]]:
     clip_infos: List[Dict[str, object]] = []
     for clip_dir in sorted(path for path in session_path.iterdir() if path.is_dir()):
+        try:
+            start_timestamp_ms = extract_clip_start_timestamp_ms(clip_dir.name)
+        except (ValueError, IndexError):
+            continue
         calib_dir = clip_dir / "calib_extract"
         gnss_to_lidar_path = calib_dir / "calib_gnss_to_lidar_top_ENU.json"
         lidar_to_car_path = calib_dir / "calib_lidar_top_to_car.json"
@@ -41,7 +45,7 @@ def load_session_calibrations(session_path: Path) -> List[Dict[str, object]]:
         clip_infos.append(
             {
                 "clip_name": clip_dir.name,
-                "start_timestamp_ms": extract_clip_start_timestamp_ms(clip_dir.name),
+                "start_timestamp_ms": start_timestamp_ms,
                 "gnss_to_lidar_matrix": _load_extrinsic_matrix(
                     gnss_to_lidar_path,
                     "gnss-to-lidar-top",

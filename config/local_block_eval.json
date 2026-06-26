@@ -1,11 +1,14 @@
 {
   "window_size_x_m": 4.0,
   "window_size_y_m": 4.0,
-  "distance_interval_m": 4.0,
+  "window_size_z_min_m": -2.0,
+  "window_size_z_max_m": 2.0,
+  "distance_interval_m": 10.0,
   "fit_method": "ransac",
   "ransac_distance_threshold_m": 0.05,
   "ransac_max_iterations": 200,
   "ransac_min_inliers": 20,
   "p95_percentile": 95.0,
-  "min_points_to_fit": 30
+  "min_points_to_fit": 30,
+  "save_blocks_laz": true
 }

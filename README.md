@@ -13,7 +13,7 @@
 - 将局部点云块转到关键帧自车坐标系
 - 使用 `RANSAC` 拟合局部地面平面
 - 输出局部地面质量评估表格
-- 输出两张折线图
+- 输出三张折线图
 
 ## 目录结构
 
@@ -27,6 +27,7 @@
 主要脚本：
 
 - `tools/extract_keyframe_local_blocks.py`
+- `tools/merge_summary_reports.py`
 
 默认配置：
 
@@ -75,6 +76,16 @@ python3 tools/extract_keyframe_local_blocks.py \
   --config /mnt/workspace/mapping_ground/MapEval3D/config/local_block_eval.json
 ```
 
+合并多个 `summary.csv` 生成 HTML 报告：
+
+```bash
+python3 tools/merge_summary_reports.py \
+  --output-html /path/to/summary_report.html \
+  /path/to/run_1/summary.csv \
+  /path/to/run_2/summary.csv \
+  /path/to/run_3/summary.csv
+```
+
 ## 命令行参数说明
 
 - `--input-laz`
@@ -92,6 +103,14 @@ python3 tools/extract_keyframe_local_blocks.py \
 - `--config`
   配置文件路径，使用 JSON 格式。
 
+`tools/merge_summary_reports.py` 参数说明：
+
+- `--output-html`
+  输出的 HTML 报告路径。
+
+- `summary.csv` 列表
+  一个或多个 `summary.csv` 文件，按命令行输入顺序合并。输出表格第一列 `id` 即该输入顺序，折线图横轴也使用该顺序编号。
+
 ## 配置文件说明
 
 默认配置文件内容如下：
@@ -100,13 +119,16 @@ python3 tools/extract_keyframe_local_blocks.py \
 {
   "window_size_x_m": 4.0,
   "window_size_y_m": 4.0,
+  "window_size_z_min_m": -2.0,
+  "window_size_z_max_m": 2.0,
   "distance_interval_m": 4.0,
   "fit_method": "ransac",
   "ransac_distance_threshold_m": 0.05,
   "ransac_max_iterations": 200,
   "ransac_min_inliers": 20,
   "p95_percentile": 95.0,
-  "min_points_to_fit": 30
+  "min_points_to_fit": 30,
+  "save_blocks_laz": true
 }
 ```
 
@@ -117,6 +139,12 @@ python3 tools/extract_keyframe_local_blocks.py \
 
 - `window_size_y_m`
   局部块在关键帧坐标系下 `y` 方向长度，单位米。
+
+- `window_size_z_min_m`
+  局部块在关键帧自车坐标系下允许保留的最小 `z` 值，单位米。用于过滤高架桥、上下层道路等同一 `x/y` 范围内但高度差较大的地面点。
+
+- `window_size_z_max_m`
+  局部块在关键帧自车坐标系下允许保留的最大 `z` 值，单位米。只有 `window_size_z_min_m <= z <= window_size_z_max_m` 的点会进入局部块。
 
 - `distance_interval_m`
   沿轨迹选取关键帧的距离间隔，单位米。
@@ -138,6 +166,9 @@ python3 tools/extract_keyframe_local_blocks.py \
 
 - `min_points_to_fit`
   一个局部块允许做平面拟合的最小点数。
+
+- `save_blocks_laz`
+  是否保存每个关键帧对应的局部地面点云块。设置为 `true` 时输出 `blocks/*.laz`，设置为 `false` 时只输出评估表格和折线图，不保存小块点云文件。默认值为 `true`。
 
 ## 坐标变换链路
 
@@ -192,8 +223,10 @@ clip_i_start <= timestamp_ms < clip_{i+1}_start
 运行完成后，输出目录下通常包含：
 
 - `index.csv`
+- `summary.csv`
 - `blocks/`
 - `plane_distance_mean_p95.png`
+- `plane_distance_p95_threshold.png`
 - `plane_distance_thickness_p95_p5.png`
 
 含义：
@@ -201,14 +234,27 @@ clip_i_start <= timestamp_ms < clip_{i+1}_start
 - `index.csv`
   每个关键帧局部块对应的一行评估结果。
 
+- `summary.csv`
+  全局汇总结果。第一列记录 `session_name`，其值来自 `--session-path` 最后一级目录名；随后统计各类 `status` 数量，并仅使用 `status == "ok"` 的行计算三个核心指标的均值和标准差。
+
 - `blocks/`
-  每个关键帧对应的局部地面点云块，文件名为 `keyframe_<timestamp_ms>.laz`。当前块坐标系为关键帧自车坐标系。
+  每个关键帧对应的局部地面点云块，文件名为 `keyframe_<timestamp_ms>.laz`。当前块坐标系为关键帧自车坐标系。局部块同时按 `x/y` 矩形和 `z` 高度范围裁剪。仅当 `save_blocks_laz` 为 `true` 时输出。
 
 - `plane_distance_mean_p95.png`
   以 `id` 为横轴、`plane_distance_mean_p95` 为纵轴的折线图。
 
+- `plane_distance_p95_threshold.png`
+  以 `id` 为横轴、`plane_distance_p95_threshold` 为纵轴的折线图。
+
 - `plane_distance_thickness_p95_p5.png`
   以 `id` 为横轴、`plane_distance_thickness_p95_p5` 为纵轴的折线图。
+
+`tools/merge_summary_reports.py` 输出内容：
+
+- `summary_report.html`
+  单文件 HTML 报告，包含两部分：
+  1. 按输入顺序合并后的 `summary.csv` 表格，第一列增加顺序 `id`
+  2. 一张三折线图，横轴为该 `id`，三条线分别为 `plane_distance_mean_p95_mean`、`plane_distance_p95_threshold_mean`、`plane_distance_thickness_p95_p5_mean`
 
 ## 输出表格 index.csv 各列说明
 
@@ -254,7 +300,36 @@ clip_i_start <= timestamp_ms < clip_{i+1}_start
 (point_count - ransac_inlier_count) / point_count
 ```
 
-## 两张折线图说明
+## 输出表格 summary.csv 各列说明
+
+- `session_name`
+  当前输入 `--session-path` 的最后一级目录名。例如输入 `/mnt/oss/gacrnd-annotation/ruqi/upm/datasets/INTERSECTION_ws07zb1ybjwy/` 时，该列为 `INTERSECTION_ws07zb1ybjwy`。
+
+- `total_row_count`
+  `index.csv` 中的总行数。
+
+- `status_ok_count`
+  `status == "ok"` 的关键帧数量。
+
+- `status_empty_count`
+  `status == "empty"` 的关键帧数量。
+
+- `status_insufficient_points_count`
+  `status == "insufficient_points"` 的关键帧数量。
+
+- `status_fit_failed_count`
+  `status == "fit_failed"` 的关键帧数量。
+
+- `plane_distance_mean_p95_mean` / `plane_distance_mean_p95_std`
+  仅基于 `status == "ok"` 的行，统计 `plane_distance_mean_p95` 的均值和标准差。
+
+- `plane_distance_p95_threshold_mean` / `plane_distance_p95_threshold_std`
+  仅基于 `status == "ok"` 的行，统计 `plane_distance_p95_threshold` 的均值和标准差。
+
+- `plane_distance_thickness_p95_p5_mean` / `plane_distance_thickness_p95_p5_std`
+  仅基于 `status == "ok"` 的行，统计 `plane_distance_thickness_p95_p5` 的均值和标准差。
+
+## 三张折线图说明
 
 ### 1. plane_distance_mean_p95.png
 
@@ -293,6 +368,25 @@ clip_i_start <= timestamp_ms < clip_{i+1}_start
 
 - 值越小，说明地面上下厚度越薄
 - 值越大，可能表示厚化、双层、重影或局部起伏异常
+
+### 3. plane_distance_p95_threshold.png
+
+横轴：
+
+- `id`
+
+纵轴：
+
+- `plane_distance_p95_threshold`
+
+含义：
+
+- 用于观察每个关键帧局部块中，主体 `95%` 点到拟合平面的绝对距离上边界。
+
+一般解释：
+
+- 值越小，说明大多数点更贴近平面
+- 值越大，说明主体点分布更厚或更散
 
 ## 指标计算规则摘要
 

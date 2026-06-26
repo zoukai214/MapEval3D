@@ -7,6 +7,9 @@ from typing import Dict
 DEFAULT_CONFIG = {
     "fit_method": "ransac",
     "p95_percentile": 95.0,
+    "save_blocks_laz": True,
+    "window_size_z_min_m": -2.0,
+    "window_size_z_max_m": 2.0,
 }
 
 REQUIRED_CONFIG_KEYS = {
@@ -51,9 +54,16 @@ def load_eval_config(config_path: Path) -> Dict[str, Any]:
     if not 0.0 < p95_percentile <= 100.0:
         raise ValueError("p95_percentile must be in (0, 100].")
 
+    window_size_z_min_m = float(merged_config["window_size_z_min_m"])
+    window_size_z_max_m = float(merged_config["window_size_z_max_m"])
+    if window_size_z_min_m >= window_size_z_max_m:
+        raise ValueError("window_size_z_min_m must be smaller than window_size_z_max_m.")
+
     return {
         "window_size_x_m": _as_positive_float(merged_config, "window_size_x_m"),
         "window_size_y_m": _as_positive_float(merged_config, "window_size_y_m"),
+        "window_size_z_min_m": window_size_z_min_m,
+        "window_size_z_max_m": window_size_z_max_m,
         "distance_interval_m": _as_positive_float(merged_config, "distance_interval_m"),
         "fit_method": fit_method,
         "ransac_distance_threshold_m": _as_positive_float(
@@ -64,4 +74,5 @@ def load_eval_config(config_path: Path) -> Dict[str, Any]:
         "ransac_min_inliers": _as_positive_int(merged_config, "ransac_min_inliers"),
         "p95_percentile": p95_percentile,
         "min_points_to_fit": _as_positive_int(merged_config, "min_points_to_fit"),
+        "save_blocks_laz": bool(merged_config["save_blocks_laz"]),
     }

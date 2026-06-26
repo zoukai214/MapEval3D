@@ -24,6 +24,21 @@ INDEX_FIELDNAMES = [
     "ransac_outlier_ratio",
 ]
 
+SUMMARY_FIELDNAMES = [
+    "session_name",
+    "total_row_count",
+    "status_ok_count",
+    "status_empty_count",
+    "status_insufficient_points_count",
+    "status_fit_failed_count",
+    "plane_distance_mean_p95_mean",
+    "plane_distance_mean_p95_std",
+    "plane_distance_p95_threshold_mean",
+    "plane_distance_p95_threshold_std",
+    "plane_distance_thickness_p95_p5_mean",
+    "plane_distance_thickness_p95_p5_std",
+]
+
 
 def read_laz_points_and_classification(
     input_laz: Path,
@@ -161,3 +176,66 @@ def write_plane_thickness_plot(output_path: Path, rows: Sequence[dict]) -> None:
     output_path.parent.mkdir(parents=True, exist_ok=True)
     plt.savefig(output_path, dpi=150)
     plt.close()
+
+
+def write_plane_threshold_plot(output_path: Path, rows: Sequence[dict]) -> None:
+    plot_rows = [
+        row for row in rows
+        if row["status"] == "ok" and row["plane_distance_p95_threshold"] != ""
+    ]
+    if not plot_rows:
+        return
+
+    ids = [int(row["id"]) for row in plot_rows]
+    threshold_values = [float(row["plane_distance_p95_threshold"]) for row in plot_rows]
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(ids, threshold_values, marker="o", linewidth=1.5, markersize=3)
+    plt.xlabel("id")
+    plt.ylabel("plane_distance_p95_threshold")
+    plt.title("Plane Distance P95 Threshold by Frame ID")
+    plt.grid(True, linestyle="--", linewidth=0.5, alpha=0.6)
+    plt.tight_layout()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(output_path, dpi=150)
+    plt.close()
+
+
+def write_summary_rows(output_csv: Path, rows: Sequence[dict], session_name: str) -> None:
+    status_counts = {}
+    for row in rows:
+        status = str(row["status"])
+        status_counts[status] = status_counts.get(status, 0) + 1
+
+    ok_rows = [row for row in rows if row["status"] == "ok"]
+
+    def compute_mean_and_std(fieldname: str) -> Tuple[float, float]:
+        values = np.asarray([float(row[fieldname]) for row in ok_rows], dtype=np.float64)
+        if values.size == 0:
+            return float("nan"), float("nan")
+        return float(np.mean(values)), float(np.std(values))
+
+    mean_p95_mean, mean_p95_std = compute_mean_and_std("plane_distance_mean_p95")
+    threshold_mean, threshold_std = compute_mean_and_std("plane_distance_p95_threshold")
+    thickness_mean, thickness_std = compute_mean_and_std("plane_distance_thickness_p95_p5")
+
+    summary_row = {
+        "session_name": session_name,
+        "total_row_count": len(rows),
+        "status_ok_count": status_counts.get("ok", 0),
+        "status_empty_count": status_counts.get("empty", 0),
+        "status_insufficient_points_count": status_counts.get("insufficient_points", 0),
+        "status_fit_failed_count": status_counts.get("fit_failed", 0),
+        "plane_distance_mean_p95_mean": mean_p95_mean,
+        "plane_distance_mean_p95_std": mean_p95_std,
+        "plane_distance_p95_threshold_mean": threshold_mean,
+        "plane_distance_p95_threshold_std": threshold_std,
+        "plane_distance_thickness_p95_p5_mean": thickness_mean,
+        "plane_distance_thickness_p95_p5_std": thickness_std,
+    }
+
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    with output_csv.open("w", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=SUMMARY_FIELDNAMES)
+        writer.writeheader()
+        writer.writerow(summary_row)
