@@ -45,8 +45,7 @@ def read_session_names(csv_path: Path) -> List[str]:
 
 
 def build_extract_command(
-    input_laz: Path,
-    input_gps_msg: Path,
+    input_root: Path,
     session_path: Path,
     output_dir: Path,
     config_path: Path,
@@ -54,10 +53,8 @@ def build_extract_command(
     return [
         sys.executable,
         str(PROJECT_ROOT / "tools" / "extract_keyframe_local_blocks.py"),
-        "--input-laz",
-        str(input_laz),
-        "--input-gps-msg",
-        str(input_gps_msg),
+        "--input-root",
+        str(input_root),
         "--session-path",
         str(session_path),
         "--output-dir",
@@ -99,9 +96,9 @@ def run_batch(
         output_dir = output_root / session_name
 
         laz_files = sorted(laz_dir.glob("*.laz")) if laz_dir.exists() else []
-        if len(laz_files) != 1:
+        if len(laz_files) == 0:
             print(
-                f"[SKIP] {session_name}: expected 1 laz in {laz_dir}, found {len(laz_files)}",
+                f"[SKIP] {session_name}: expected at least 1 laz in {laz_dir}, found 0",
                 flush=True,
             )
             skipped_count += 1
@@ -111,9 +108,13 @@ def run_batch(
             skipped_count += 1
             continue
 
+        if len(laz_files) > 1:
+            print(
+                f"[MERGE] {session_name}: evaluating {len(laz_files)} laz files in memory",
+                flush=True,
+            )
         command = build_extract_command(
-            input_laz=laz_files[0],
-            input_gps_msg=input_gps_msg,
+            input_root=session_path,
             session_path=session_path,
             output_dir=output_dir,
             config_path=config_path,

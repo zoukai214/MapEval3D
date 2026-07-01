@@ -2,8 +2,10 @@
 import argparse
 from pathlib import Path
 import sys
+from typing import List
 from typing import Optional
 from typing import Sequence
+from typing import Tuple
 
 import numpy as np
 
@@ -21,8 +23,10 @@ from mapeval3d.io_utils import build_block_filename
 from mapeval3d.io_utils import filter_ground_points
 from mapeval3d.io_utils import read_gps_pose_rows
 from mapeval3d.io_utils import read_laz_points_and_classification
+from mapeval3d.io_utils import read_laz_points_and_classification_from_inputs
 from mapeval3d.io_utils import select_keyframes_by_2d_distance
 from mapeval3d.io_utils import write_cropped_laz
+from mapeval3d.io_utils import write_cropped_laz_from_inputs
 from mapeval3d.io_utils import write_index_rows
 from mapeval3d.io_utils import write_plane_distance_plot
 from mapeval3d.io_utils import write_plane_threshold_plot
@@ -35,12 +39,26 @@ from mapeval3d.pose_utils import transform_world_points_to_keyframe
 
 def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-laz", required=True)
-    parser.add_argument("--input-gps-msg", required=True)
+    parser.add_argument("--input-root", required=True)
     parser.add_argument("--session-path", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--config", required=True)
     return parser.parse_args(argv)
+
+
+def resolve_input_paths_from_root(input_root: Path) -> Tuple[Path, List[Path]]:
+    label_dir = input_root / "prelabel" / "RoadMark_label"
+    input_gps_msg = label_dir / "gps_msg.txt"
+    laz_dir = label_dir / "laz"
+
+    if not input_gps_msg.is_file():
+        raise ValueError(f"Missing gps_msg.txt at {input_gps_msg}")
+
+    input_laz_paths = sorted(laz_dir.glob("*.laz")) if laz_dir.is_dir() else []
+    if not input_laz_paths:
+        raise ValueError(f"No laz files found in {laz_dir}")
+
+    return input_gps_msg, input_laz_paths
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
@@ -51,9 +69,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     output_dir = Path(args.output_dir)
     blocks_dir = output_dir / "blocks"
 
-    points_xyz, classifications, las = read_laz_points_and_classification(Path(args.input_laz))
+    input_gps_msg, input_laz_paths = resolve_input_paths_from_root(Path(args.input_root))
+    if len(input_laz_paths) == 1:
+        points_xyz, classifications, las = read_laz_points_and_classification(input_laz_paths[0])
+        source_indices = np.zeros(points_xyz.shape[0], dtype=np.int32)
+        source_las_list = [las]
+    else:
+        points_xyz, classifications, source_indices, source_las_list = (
+            read_laz_points_and_classification_from_inputs(input_laz_paths)
+        )
+        las = source_las_list[0]
     ground_points_xyz, ground_mask = filter_ground_points(points_xyz, classifications)
-    pose_rows = read_gps_pose_rows(Path(args.input_gps_msg))
+    pose_rows = read_gps_pose_rows(input_gps_msg)
     clip_infos = load_session_calibrations(session_path)
     keyframe_rows = select_keyframes_by_2d_distance(
         pose_rows,
@@ -152,9 +179,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         }
 
         if config["save_blocks_laz"]:
+            selected_point_indices = np.flatnonzero(ground_mask)[crop_mask]
             block_name = build_block_filename(timestamp_ms)
             output_path = blocks_dir / block_name
-            write_cropped_laz(output_path, las, ground_mask, crop_mask, cropped_local_points)
+            if len(source_las_list) == 1:
+                write_cropped_laz(output_path, las, ground_mask, crop_mask, cropped_local_points)
+            else:
+                write_cropped_laz_from_inputs(
+                    output_path=output_path,
+                    source_las_list=source_las_list,
+                    selected_point_indices=selected_point_indices,
+                    cropped_local_points=cropped_local_points,
+                    source_indices=source_indices,
+                )
         index_rows.append(
             {
                 **base_row,

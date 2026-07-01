@@ -4,7 +4,7 @@
 
 当前实现能力：
 
-- 读取单个 `laz` 地图文件
+- 读取一个或多个 `laz` 地图文件
 - 读取 `gps_msg.txt`
 - 读取原始数据 `session_path`
 - 按轨迹距离间隔选取关键帧
@@ -37,9 +37,13 @@
 
 脚本运行需要以下输入：
 
-- 一个带 `classification` 字段的 `laz` 文件
-- 一个 `gps_msg.txt` 文件
+- 一个导出根目录，例如 `/path/to/output_lio_x`
 - 一个原始数据 `session_path`
+
+其中导出根目录下默认需要包含：
+
+- `prelabel/RoadMark_label/gps_msg.txt`
+- `prelabel/RoadMark_label/laz/*.laz`
 
 `session_path` 下需要包含多个 `clip` 目录。每个 `clip` 目录下都需要有：
 
@@ -58,8 +62,7 @@
 
 ```bash
 python3 tools/extract_keyframe_local_blocks.py \
-  --input-laz /path/to/input.laz \
-  --input-gps-msg /path/to/gps_msg.txt \
+  --input-root /path/to/output_lio_x \
   --session-path /path/to/session_path \
   --output-dir /path/to/output_dir \
   --config config/local_block_eval.json
@@ -69,8 +72,7 @@ python3 tools/extract_keyframe_local_blocks.py \
 
 ```bash
 python3 tools/extract_keyframe_local_blocks.py \
-  --input-laz /mnt/workspace/test_data/output/prelabel/RoadMark_label/laz/1762669099099.laz \
-  --input-gps-msg /mnt/workspace/test_data/output/prelabel/RoadMark_label/gps_msg.txt \
+  --input-root /mnt/workspace/test_data/output \
   --session-path /mnt/workspace/test_data/input_raw_data \
   --output-dir /mnt/workspace/mapping_ground/MapEval3D/output/real_run_eval \
   --config /mnt/workspace/mapping_ground/MapEval3D/config/local_block_eval.json
@@ -88,11 +90,8 @@ python3 tools/merge_summary_reports.py \
 
 ## 命令行参数说明
 
-- `--input-laz`
-  输入点云地图文件路径。
-
-- `--input-gps-msg`
-  输入轨迹与位姿文件 `gps_msg.txt` 路径。
+- `--input-root`
+  输入导出根目录路径。程序会自动读取 `prelabel/RoadMark_label/gps_msg.txt` 与 `prelabel/RoadMark_label/laz/*.laz`。
 
 - `--session-path`
   原始数据目录路径。程序会扫描该目录下的 `clip`，并按关键帧时间戳匹配对应标定。

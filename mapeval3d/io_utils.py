@@ -49,6 +49,46 @@ def read_laz_points_and_classification(
     return points_xyz, classifications, las
 
 
+def read_laz_points_and_classification_from_inputs(
+    input_laz_paths: Sequence[Path],
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, List[laspy.LasData]]:
+    if not input_laz_paths:
+        raise ValueError("At least one input laz is required.")
+
+    if len(input_laz_paths) == 1:
+        points_xyz, classifications, las = read_laz_points_and_classification(input_laz_paths[0])
+        source_indices = np.zeros(points_xyz.shape[0], dtype=np.int32)
+        return points_xyz, classifications, source_indices, [las]
+
+    points_xyz_parts = []
+    classification_parts = []
+    source_indices_parts = []
+    source_las_list = []
+    first_point_format_id = None
+
+    for source_index, input_laz in enumerate(input_laz_paths):
+        points_xyz, classifications, las = read_laz_points_and_classification(input_laz)
+        point_format_id = int(las.header.point_format.id)
+        if first_point_format_id is None:
+            first_point_format_id = point_format_id
+        elif point_format_id != first_point_format_id:
+            raise ValueError(
+                "All input laz files must share the same point format for merged evaluation."
+            )
+
+        points_xyz_parts.append(points_xyz)
+        classification_parts.append(classifications)
+        source_indices_parts.append(
+            np.full(points_xyz.shape[0], source_index, dtype=np.int32)
+        )
+        source_las_list.append(las)
+
+    merged_points_xyz = np.vstack(points_xyz_parts)
+    merged_classifications = np.concatenate(classification_parts)
+    merged_source_indices = np.concatenate(source_indices_parts)
+    return merged_points_xyz, merged_classifications, merged_source_indices, source_las_list
+
+
 def filter_ground_points(
     points_xyz: np.ndarray,
     classifications: np.ndarray,
@@ -130,6 +170,67 @@ def write_cropped_laz(
     selected_las.z = cropped_local_points[:, 2]
     output_path.parent.mkdir(parents=True, exist_ok=True)
     selected_las.write(output_path)
+
+
+def write_cropped_laz_from_inputs(
+    output_path: Path,
+    source_las_list: Sequence[laspy.LasData],
+    selected_point_indices: np.ndarray,
+    cropped_local_points: np.ndarray,
+    source_indices: np.ndarray,
+) -> None:
+    if len(source_las_list) == 1:
+        selected_las = source_las_list[0][selected_point_indices]
+        selected_las.x = cropped_local_points[:, 0]
+        selected_las.y = cropped_local_points[:, 1]
+        selected_las.z = cropped_local_points[:, 2]
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        selected_las.write(output_path)
+        return
+
+    header = laspy.LasHeader(
+        point_format=source_las_list[0].header.point_format.id,
+        version=source_las_list[0].header.version,
+    )
+    header.scales = source_las_list[0].header.scales
+    header.offsets = source_las_list[0].header.offsets
+    selected_point_arrays = []
+    source_point_offsets = []
+    point_offset = 0
+
+    for source_las in source_las_list:
+        source_point_offsets.append(point_offset)
+        point_offset += len(source_las.x)
+
+    # 按来源文件拆分后再重建输出块，避免依赖不存在的整图模板文件。
+    for source_index, source_las in enumerate(source_las_list):
+        source_mask = source_indices[selected_point_indices] == source_index
+        if not np.any(source_mask):
+            continue
+        source_selected_indices = selected_point_indices[source_mask] - source_point_offsets[source_index]
+        source_selected_points = cropped_local_points[source_mask]
+        selected_las = source_las[source_selected_indices]
+        selected_las.x = source_selected_points[:, 0]
+        selected_las.y = source_selected_points[:, 1]
+        selected_las.z = source_selected_points[:, 2]
+        selected_point_arrays.append(selected_las.points.array.copy())
+
+    if not selected_point_arrays:
+        raise ValueError("No cropped points available for writing.")
+
+    output_las = laspy.LasData(header)
+    if len(selected_point_arrays) == 1:
+        merged_array = selected_point_arrays[0]
+    else:
+        merged_array = np.concatenate(selected_point_arrays)
+    output_las.points = laspy.ScaleAwarePointRecord(
+        merged_array,
+        header.point_format,
+        header.scales,
+        header.offsets,
+    )
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_las.write(output_path)
 
 
 def write_plane_distance_plot(output_path: Path, rows: Sequence[dict]) -> None:

@@ -16,6 +16,7 @@ from mapeval3d.crop_utils import crop_points_by_rectangle
 from mapeval3d.ground_eval import evaluate_ground_block
 from mapeval3d.io_utils import build_block_filename
 from mapeval3d.io_utils import filter_ground_points
+from mapeval3d.io_utils import read_laz_points_and_classification_from_inputs
 from mapeval3d.io_utils import read_gps_pose_rows
 from mapeval3d.io_utils import select_keyframes_by_2d_distance
 from mapeval3d.io_utils import write_index_rows
@@ -645,8 +646,12 @@ class ExtractionToolTest(unittest.TestCase):
     def test_main_writes_block_and_index_for_ground_points(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            input_laz = temp_root / "input.laz"
-            input_pose_csv = temp_root / "poses.csv"
+            input_root = temp_root / "output_lio_8"
+            label_dir = input_root / "prelabel" / "RoadMark_label"
+            laz_dir = label_dir / "laz"
+            laz_dir.mkdir(parents=True)
+            input_laz = laz_dir / "input.laz"
+            input_pose_csv = label_dir / "gps_msg.txt"
             output_dir = temp_root / "output"
             config_path = temp_root / "config.json"
             session_path = temp_root / "session"
@@ -730,10 +735,8 @@ class ExtractionToolTest(unittest.TestCase):
 
             exit_code = SCRIPT_MODULE.main(
                 [
-                    "--input-laz",
-                    str(input_laz),
-                    "--input-gps-msg",
-                    str(input_pose_csv),
+                    "--input-root",
+                    str(input_root),
                     "--session-path",
                     str(session_path),
                     "--output-dir",
@@ -786,11 +789,226 @@ class ExtractionToolTest(unittest.TestCase):
             self.assertTrue((output_dir / "plane_distance_p95_threshold.png").exists())
             self.assertTrue((output_dir / "plane_distance_thickness_p95_p5.png").exists())
 
+    def test_parse_args_accepts_input_root(self) -> None:
+        args = SCRIPT_MODULE.parse_args(
+            [
+                "--input-root",
+                "/tmp/output_lio_8",
+                "--session-path",
+                "/tmp/session",
+                "--output-dir",
+                "/tmp/output",
+                "--config",
+                "/tmp/config.json",
+            ]
+        )
+
+        self.assertEqual(args.input_root, "/tmp/output_lio_8")
+
+    def test_resolve_input_paths_from_root_finds_multiple_laz(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            label_dir = temp_root / "prelabel" / "RoadMark_label"
+            laz_dir = label_dir / "laz"
+            laz_dir.mkdir(parents=True)
+            (label_dir / "gps_msg.txt").write_text("", encoding="utf-8")
+            (laz_dir / "b.laz").write_text("", encoding="utf-8")
+            (laz_dir / "a.laz").write_text("", encoding="utf-8")
+
+            input_gps_msg, input_laz_paths = SCRIPT_MODULE.resolve_input_paths_from_root(temp_root)
+
+            self.assertEqual(input_gps_msg, label_dir / "gps_msg.txt")
+            self.assertEqual(
+                input_laz_paths,
+                [laz_dir / "a.laz", laz_dir / "b.laz"],
+            )
+
+    def test_resolve_input_paths_from_root_raises_when_gps_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            laz_dir = temp_root / "prelabel" / "RoadMark_label" / "laz"
+            laz_dir.mkdir(parents=True)
+            (laz_dir / "a.laz").write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "Missing gps_msg.txt"):
+                SCRIPT_MODULE.resolve_input_paths_from_root(temp_root)
+
+    def test_resolve_input_paths_from_root_raises_when_laz_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            label_dir = temp_root / "prelabel" / "RoadMark_label"
+            (label_dir / "laz").mkdir(parents=True)
+            (label_dir / "gps_msg.txt").write_text("", encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "No laz files found"):
+                SCRIPT_MODULE.resolve_input_paths_from_root(temp_root)
+
+    def test_read_laz_points_and_classification_from_inputs_merges_sources(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            laz_a = temp_root / "a.laz"
+            laz_b = temp_root / "b.laz"
+
+            header = laspy.LasHeader(point_format=3, version="1.2")
+
+            las_a = laspy.LasData(header)
+            las_a.x = np.array([1.0, 2.0])
+            las_a.y = np.array([3.0, 4.0])
+            las_a.z = np.array([5.0, 6.0])
+            las_a.classification = np.array([1, 2], dtype=np.uint8)
+            las_a.write(laz_a)
+
+            las_b = laspy.LasData(header)
+            las_b.x = np.array([7.0])
+            las_b.y = np.array([8.0])
+            las_b.z = np.array([9.0])
+            las_b.classification = np.array([1], dtype=np.uint8)
+            las_b.write(laz_b)
+
+            points_xyz, classifications, source_indices, source_las_list = (
+                read_laz_points_and_classification_from_inputs([laz_a, laz_b])
+            )
+
+            np.testing.assert_allclose(
+                points_xyz,
+                np.array(
+                    [
+                        [1.0, 3.0, 5.0],
+                        [2.0, 4.0, 6.0],
+                        [7.0, 8.0, 9.0],
+                    ]
+                ),
+            )
+            np.testing.assert_array_equal(classifications, np.array([1, 2, 1], dtype=np.uint8))
+            np.testing.assert_array_equal(source_indices, np.array([0, 0, 1], dtype=np.int32))
+            self.assertEqual(len(source_las_list), 2)
+
+    def test_main_writes_block_laz_from_multiple_inputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            input_root = temp_root / "output_lio_8"
+            label_dir = input_root / "prelabel" / "RoadMark_label"
+            laz_dir = label_dir / "laz"
+            laz_dir.mkdir(parents=True)
+            input_laz_a = laz_dir / "input_a.laz"
+            input_laz_b = laz_dir / "input_b.laz"
+            input_pose_csv = label_dir / "gps_msg.txt"
+            output_dir = temp_root / "output"
+            config_path = temp_root / "config.json"
+            session_path = temp_root / "session"
+            clip_dir = session_path / "GACRT025_1_MT" / "calib_extract"
+            clip_dir.mkdir(parents=True)
+
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "window_size_x_m": 10.0,
+                        "window_size_y_m": 10.0,
+                        "distance_interval_m": 10.0,
+                        "fit_method": "ransac",
+                        "ransac_distance_threshold_m": 0.05,
+                        "ransac_max_iterations": 100,
+                        "ransac_min_inliers": 20,
+                        "p95_percentile": 95.0,
+                        "min_points_to_fit": 20,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (clip_dir / "calib_gnss_to_lidar_top_ENU.json").write_text(
+                json.dumps(
+                    {
+                        "gnss-to-lidar-top": {
+                            "param": {
+                                "sensor_calib": {
+                                    "data": [
+                                        [1.0, 0.0, 0.0, 1.0],
+                                        [0.0, 1.0, 0.0, 0.0],
+                                        [0.0, 0.0, 1.0, 0.0],
+                                        [0.0, 0.0, 0.0, 1.0],
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (clip_dir / "calib_lidar_top_to_car.json").write_text(
+                json.dumps(
+                    {
+                        "lidar-top-to-car": {
+                            "param": {
+                                "sensor_calib": {
+                                    "data": [
+                                        [1.0, 0.0, 0.0, 0.5],
+                                        [0.0, 1.0, 0.0, 0.0],
+                                        [0.0, 0.0, 1.0, 0.0],
+                                        [0.0, 0.0, 0.0, 1.0],
+                                    ]
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            header = laspy.LasHeader(point_format=3, version="1.2")
+            local_x = np.linspace(-1.5, 1.5, 25)
+            local_y = np.linspace(-1.5, 1.5, 25)
+            grid_x, grid_y = np.meshgrid(local_x, local_y)
+            flat_x = grid_x.reshape(-1)
+            flat_y = grid_y.reshape(-1)
+            flat_z = 1.0 + 0.01 * flat_x - 0.02 * flat_y
+
+            split_index = flat_x.shape[0] // 2
+            las_a = laspy.LasData(header)
+            las_a.x = 10.0 + flat_x[:split_index]
+            las_a.y = 5.0 + flat_y[:split_index]
+            las_a.z = flat_z[:split_index]
+            las_a.classification = np.ones(split_index, dtype=np.uint8)
+            las_a.write(input_laz_a)
+
+            las_b = laspy.LasData(header)
+            las_b.x = 10.0 + flat_x[split_index:]
+            las_b.y = 5.0 + flat_y[split_index:]
+            las_b.z = flat_z[split_index:]
+            las_b.classification = np.ones(flat_x.shape[0] - split_index, dtype=np.uint8)
+            las_b.write(input_laz_b)
+
+            with input_pose_csv.open("w", newline="") as handle:
+                handle.write("#t,x,y,z,l,l,h,ins_status,pos_type,err,qw,qx,qy,qz\n")
+                handle.write("1500,10.0,5.0,1.0,0,0,0,0,0,0,1.0,0.0,0.0,0.0\n")
+
+            exit_code = SCRIPT_MODULE.main(
+                [
+                    "--input-root",
+                    str(input_root),
+                    "--session-path",
+                    str(session_path),
+                    "--output-dir",
+                    str(output_dir),
+                    "--config",
+                    str(config_path),
+                ]
+            )
+            self.assertEqual(exit_code, 0)
+
+            output_laz = output_dir / "blocks" / "keyframe_1500.laz"
+            self.assertTrue(output_laz.exists())
+            output_points = laspy.read(output_laz)
+            self.assertEqual(len(output_points.x), 625)
+
     def test_main_skips_block_laz_when_config_disabled(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_root = Path(temp_dir)
-            input_laz = temp_root / "input.laz"
-            input_pose_csv = temp_root / "poses.csv"
+            input_root = temp_root / "output_lio_8"
+            label_dir = input_root / "prelabel" / "RoadMark_label"
+            laz_dir = label_dir / "laz"
+            laz_dir.mkdir(parents=True)
+            input_laz = laz_dir / "input.laz"
+            input_pose_csv = label_dir / "gps_msg.txt"
             output_dir = temp_root / "output"
             config_path = temp_root / "config.json"
             session_path = temp_root / "session"
@@ -875,10 +1093,8 @@ class ExtractionToolTest(unittest.TestCase):
 
             exit_code = SCRIPT_MODULE.main(
                 [
-                    "--input-laz",
-                    str(input_laz),
-                    "--input-gps-msg",
-                    str(input_pose_csv),
+                    "--input-root",
+                    str(input_root),
                     "--session-path",
                     str(session_path),
                     "--output-dir",
@@ -1027,21 +1243,23 @@ class BatchExtractIntersectionsTest(unittest.TestCase):
             )
 
             self.assertEqual(exit_code, 0)
-            self.assertEqual(len(captured_commands), 2)
+            self.assertEqual(len(captured_commands), 3)
             command = captured_commands[0]
-            self.assertIn("--input-laz", command)
-            self.assertIn(str(valid_laz_dir / "map.laz"), command)
-            self.assertIn("--input-gps-msg", command)
-            self.assertIn(str(valid_gps), command)
+            self.assertIn("--input-root", command)
+            self.assertIn(str(dataset_root / "valid_session"), command)
             self.assertIn("--session-path", command)
             self.assertIn(str(dataset_root / "valid_session"), command)
             self.assertIn("--output-dir", command)
             self.assertIn(str(output_root / "valid_session"), command)
             self.assertIn("--config", command)
             self.assertIn(str(config_path), command)
-            merge_command = captured_commands[1]
+            multi_laz_command = captured_commands[1]
+            self.assertIn("--input-root", multi_laz_command)
+            self.assertIn(str(dataset_root / "multi_laz_session"), multi_laz_command)
+            merge_command = captured_commands[2]
             self.assertIn("merge_summary_reports.py", " ".join(merge_command))
             self.assertIn(str(output_root / "valid_session" / "summary.csv"), merge_command)
+            self.assertIn(str(output_root / "multi_laz_session" / "summary.csv"), merge_command)
             self.assertIn(str(temp_root / "report.html"), merge_command)
 
 
